@@ -1,7 +1,34 @@
-const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y:0,z:0},vel={x:0,y:0,z:0},last=0,running=false,lastStill=0;
+const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y:0,z:0},vel={x:0,y:0,z:0},last=0,running=false,lastStill=0,rx=[],live={ax:0,ay:0,az:0,roll:0,pitch:0,yaw:0};
 const SERVICE_FILTERS=[]; // connect by device name; discover characteristics after pairing
 $('connect').onclick=async()=>{try{device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'WT'}],optionalServices:['0000ffe5-0000-1000-8000-00805f9a34fb']});server=await device.gatt.connect();let services=await server.getPrimaryServices();for(const s of services){let cs=await s.getCharacteristics();let c=cs.find(x=>x.properties.notify);if(c){char=c;break}}if(!char)throw Error('No notification characteristic found');await char.startNotifications();char.addEventListener('characteristicvaluechanged',packet);$('status').textContent='Connected';$('status').classList.add('on');}catch(e){alert('Bluetooth connection failed: '+e.message)}};
-function packet(e){const d=new Uint8Array(e.target.value.buffer);for(let i=0;i<=d.length-11;i++)if(d[i]===0x55&&d[i+1]===0x51){const dv=new DataView(d.buffer,d.byteOffset+i,11);const g=9.80665;let ax=dv.getInt16(2,true)/32768*16*g,ay=dv.getInt16(4,true)/32768*16*g,az=dv.getInt16(6,true)/32768*16*g;integrate(ax,ay,az)}}
+function packet(e){
+  const incoming=new Uint8Array(e.target.value.buffer,e.target.value.byteOffset,e.target.value.byteLength);
+  rx.push(...incoming);
+  // WitMotion frames are 11 bytes and BLE notifications can split or combine frames.
+  while(rx.length>=11){
+    const start=rx.indexOf(0x55);
+    if(start<0){rx=[];break}
+    if(start>0)rx.splice(0,start);
+    if(rx.length<11)break;
+    const type=rx[1];
+    if(type<0x50||type>0x5f){rx.shift();continue}
+    const frame=rx.slice(0,11);rx.splice(0,11);
+    const dv=new DataView(Uint8Array.from(frame).buffer);
+    if(type===0x51){
+      const g=9.80665;
+      live.ax=dv.getInt16(2,true)/32768*16*g;
+      live.ay=dv.getInt16(4,true)/32768*16*g;
+      live.az=dv.getInt16(6,true)/32768*16*g;
+      integrate(live.ax,live.ay,live.az);
+    }else if(type===0x53){
+      live.roll=dv.getInt16(2,true)/32768*180;
+      live.pitch=dv.getInt16(4,true)/32768*180;
+      live.yaw=dv.getInt16(6,true)/32768*180;
+    }
+    const liveEl=document.getElementById('liveSensor');
+    if(liveEl)liveEl.textContent='LIVE • R '+live.roll.toFixed(1)+'°  P '+live.pitch.toFixed(1)+'°  A '+Math.hypot(live.ax,live.ay,live.az).toFixed(2)+' m/s²';
+  }
+}
 function integrate(ax,ay,az){if(!running)return;let now=performance.now();if(!last){last=now;return}let dt=Math.min((now-last)/1000,.05);last=now;let mag=Math.hypot(ax,ay,az),still=Math.abs(mag-9.80665)<.12;if(still){if(!lastStill)lastStill=now;if(now-lastStill>180){vel.x=vel.y=vel.z=0}return}else lastStill=0;
 // Raw prototype: gravity/orientation compensation will be calibrated from full IMU packets.
 vel.x+=ax*dt;vel.y+=ay*dt;vel.z+=(az-9.80665)*dt;pos.x+=vel.x*dt;pos.y+=vel.y*dt;pos.z+=vel.z*dt;render()}
