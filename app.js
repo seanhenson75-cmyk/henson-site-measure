@@ -1,4 +1,4 @@
-const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y:0,z:0},vel={x:0,y:0,z:0},last=0,running=false,lastStill=0,rx=[],live={ax:0,ay:0,az:0,roll:0,pitch:0,yaw:0};
+const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y:0,z:0},vel={x:0,y:0,z:0},last=0,running=false,lastStill=0,rx=[],bias={x:0,y:0,z:0},cal=[],live={ax:0,ay:0,az:0,gx:0,gy:0,gz:0,roll:0,pitch:0,yaw:0};
 const SERVICE_FILTERS=[]; // connect by device name; discover characteristics after pairing
 $('connect').onclick=async()=>{try{device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'WT'}],optionalServices:['0000ffe5-0000-1000-8000-00805f9a34fb']});server=await device.gatt.connect();let services=await server.getPrimaryServices();let candidates=[];for(const s of services){let cs=await s.getCharacteristics();for(const c of cs)if(c.properties.notify||c.properties.indicate)candidates.push(c)}if(!candidates.length)throw Error('No notification characteristic found');char=candidates.find(c=>c.uuid.toLowerCase().includes('ffe4'))||candidates.find(c=>c.uuid.toLowerCase().includes('ffe1'))||candidates[0];await char.startNotifications();char.addEventListener('characteristicvaluechanged',packet);$('status').textContent='Connected • '+char.uuid.slice(4,8);$('status').classList.add('on');}catch(e){alert('Bluetooth connection failed: '+e.message)}};
 function packet(e){
@@ -11,6 +11,7 @@ function packet(e){
     live.ax=dv.getInt16(2,true)/32768*16*g;
     live.ay=dv.getInt16(4,true)/32768*16*g;
     live.az=dv.getInt16(6,true)/32768*16*g;
+    live.gx=dv.getInt16(8,true)/32768*2000;live.gy=dv.getInt16(10,true)/32768*2000;live.gz=dv.getInt16(12,true)/32768*2000;
     live.roll=dv.getInt16(14,true)/32768*180;
     live.pitch=dv.getInt16(16,true)/32768*180;
     live.yaw=dv.getInt16(18,true)/32768*180;
@@ -29,10 +30,27 @@ function packet(e){
   }
   if(liveEl)liveEl.textContent='RX '+incoming.length+' bytes • '+Array.from(incoming.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
 }
-function integrate(ax,ay,az){if(!running)return;let now=performance.now();if(!last){last=now;return}let dt=Math.min((now-last)/1000,.05);last=now;let mag=Math.hypot(ax,ay,az),still=Math.abs(mag-9.80665)<.12;if(still){if(!lastStill)lastStill=now;if(now-lastStill>180){vel.x=vel.y=vel.z=0}return}else lastStill=0;
-// Raw prototype: gravity/orientation compensation will be calibrated from full IMU packets.
-vel.x+=ax*dt;vel.y+=ay*dt;vel.z+=(az-9.80665)*dt;pos.x+=vel.x*dt;pos.y+=vel.y*dt;pos.z+=vel.z*dt;render()}
-$('start').onclick=()=>{pos={x:0,y:0,z:0};vel={x:0,y:0,z:0};pts=[{...pos}];last=0;running=true;$('point').disabled=$('close').disabled=false;render()};
+function integrate(ax,ay,az){
+ if(!running)return;const now=performance.now();if(!last){last=now;return}const dt=Math.min((now-last)/1000,.05);last=now;
+ const r=live.roll*Math.PI/180,p=live.pitch*Math.PI/180,y=live.yaw*Math.PI/180;
+ // Body -> world rotation (ZYX). Remove gravity in world Z.
+ const cr=Math.cos(r),sr=Math.sin(r),cp=Math.cos(p),sp=Math.sin(p),cy=Math.cos(y),sy=Math.sin(y);
+ let wx=(cy*cp)*ax+(cy*sp*sr-sy*cr)*ay+(cy*sp*cr+sy*sr)*az;
+ let wy=(sy*cp)*ax+(sy*sp*sr+cy*cr)*ay+(sy*sp*cr-cy*sr)*az;
+ let wz=(-sp)*ax+(cp*sr)*ay+(cp*cr)*az-9.80665;
+ const gyro=Math.hypot(live.gx,live.gy,live.gz),lin=Math.hypot(wx,wy,wz),still=gyro<3&&lin<.45;
+ if(still){
+   if(!lastStill)lastStill=now;
+   cal.push({x:wx,y:wy,z:wz});if(cal.length>30)cal.shift();
+   if(now-lastStill>250){vel={x:0,y:0,z:0};if(cal.length>10){bias.x=cal.reduce((s,v)=>s+v.x,0)/cal.length;bias.y=cal.reduce((s,v)=>s+v.y,0)/cal.length;bias.z=cal.reduce((s,v)=>s+v.z,0)/cal.length}render()}return;
+ }
+ lastStill=0;cal=[];wx-=bias.x;wy-=bias.y;wz-=bias.z;
+ // Small residuals are sensor noise, not travel.
+ if(Math.abs(wx)<.10)wx=0;if(Math.abs(wy)<.10)wy=0;if(Math.abs(wz)<.10)wz=0;
+ vel.x+=wx*dt;vel.y+=wy*dt;vel.z+=wz*dt;
+ pos.x+=vel.x*dt;pos.y+=vel.y*dt;pos.z+=vel.z*dt;render()
+}
+$('start').onclick=()=>{pos={x:0,y:0,z:0};vel={x:0,y:0,z:0};pts=[{...pos}];last=0;lastStill=0;cal=[];bias={x:0,y:0,z:0};running=true;$('point').disabled=$('close').disabled=false;render()};
 $('point').onclick=()=>{pts.push({...pos});render()};$('close').onclick=()=>{if(pts.length>2)pts.push({...pts[0]});render()};$('reset').onclick=()=>{running=false;pts=[];pos={x:0,y:0,z:0};vel={x:0,y:0,z:0};render()};
 function earthwork(areaFt2){const t=parseFloat(document.getElementById('targetGrade')?.value||0);if(!pts.length||areaFt2<=0)return {cut:0,fill:0,net:0};let diffs=pts.map(p=>p.z*3.28084-t),cutDepth=diffs.filter(x=>x>0),fillDepth=diffs.filter(x=>x<0).map(Math.abs);let cutAvg=cutDepth.length?cutDepth.reduce((a,b)=>a+b,0)/diffs.length:0,fillAvg=fillDepth.length?fillDepth.reduce((a,b)=>a+b,0)/diffs.length:0;let cut=areaFt2*cutAvg/27,fill=areaFt2*fillAvg/27;return {cut,fill,net:fill-cut}}
 function render(){let path=[...pts,...(running?[pos]:[])],dist=0;for(let i=1;i<path.length;i++)dist+=Math.hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y,path[i].z-path[i-1].z);let horiz=Math.hypot(pos.x,pos.y),ft=3.28084;$('distance').textContent=(dist*ft).toFixed(2)+' ft';$('elevation').textContent=(pos.z*ft).toFixed(2)+' ft';$('slope').textContent=(horiz?pos.z/horiz*100:0).toFixed(1)+'%';let area=0;if(pts.length>2)for(let i=0,j=pts.length-1;i<pts.length;j=i++)area+=(pts[j].x*pts[i].y-pts[i].x*pts[j].y);area=Math.abs(area/2)*10.7639;$('area').textContent=area.toFixed(0)+' ft²';let ew=earthwork(area);let cutEl=document.getElementById('cut'),fillEl=document.getElementById('fill'),netEl=document.getElementById('net');if(cutEl){cutEl.textContent=ew.cut.toFixed(1)+' yd³';fillEl.textContent=ew.fill.toFixed(1)+' yd³';netEl.textContent=Math.abs(ew.net)<.05?'Balanced':(ew.net>0?'IMPORT '+ew.net.toFixed(1)+' yd³':'EXPORT '+Math.abs(ew.net).toFixed(1)+' yd³')}$('points').innerHTML=pts.map((p,i)=>'<div class="point"><span>P'+(i+1)+'</span><span>'+((p.x)*ft).toFixed(1)+', '+((p.y)*ft).toFixed(1)+', '+((p.z)*ft).toFixed(1)+' ft</span></div>').join('');draw(path)}
