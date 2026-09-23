@@ -1,8 +1,8 @@
 const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y:0,z:0},vel={x:0,y:0,z:0},last=0,running=false,lastStill=0,rx=[],live={ax:0,ay:0,az:0,roll:0,pitch:0,yaw:0};
 const SERVICE_FILTERS=[]; // connect by device name; discover characteristics after pairing
-$('connect').onclick=async()=>{try{device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'WT'}],optionalServices:['0000ffe5-0000-1000-8000-00805f9a34fb']});server=await device.gatt.connect();let services=await server.getPrimaryServices();for(const s of services){let cs=await s.getCharacteristics();let c=cs.find(x=>x.properties.notify);if(c){char=c;break}}if(!char)throw Error('No notification characteristic found');await char.startNotifications();char.addEventListener('characteristicvaluechanged',packet);$('status').textContent='Connected';$('status').classList.add('on');}catch(e){alert('Bluetooth connection failed: '+e.message)}};
+$('connect').onclick=async()=>{try{device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'WT'}],optionalServices:['0000ffe5-0000-1000-8000-00805f9a34fb']});server=await device.gatt.connect();let services=await server.getPrimaryServices();let candidates=[];for(const s of services){let cs=await s.getCharacteristics();for(const c of cs)if(c.properties.notify||c.properties.indicate)candidates.push(c)}if(!candidates.length)throw Error('No notification characteristic found');char=candidates.find(c=>c.uuid.toLowerCase().includes('ffe4'))||candidates.find(c=>c.uuid.toLowerCase().includes('ffe1'))||candidates[0];await char.startNotifications();char.addEventListener('characteristicvaluechanged',packet);$('status').textContent='Connected • '+char.uuid.slice(4,8);$('status').classList.add('on');}catch(e){alert('Bluetooth connection failed: '+e.message)}};
 function packet(e){
-  const incoming=new Uint8Array(e.target.value.buffer,e.target.value.byteOffset,e.target.value.byteLength);
+  const incoming=new Uint8Array(e.target.value.buffer,e.target.value.byteOffset,e.target.value.byteLength);const liveEl=document.getElementById('liveSensor');if(liveEl)liveEl.textContent='RX '+incoming.length+' bytes • '+Array.from(incoming.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
   rx.push(...incoming);
   // WitMotion frames are 11 bytes and BLE notifications can split or combine frames.
   while(rx.length>=11){
@@ -25,7 +25,6 @@ function packet(e){
       live.pitch=dv.getInt16(4,true)/32768*180;
       live.yaw=dv.getInt16(6,true)/32768*180;
     }
-    const liveEl=document.getElementById('liveSensor');
     if(liveEl)liveEl.textContent='LIVE • R '+live.roll.toFixed(1)+'°  P '+live.pitch.toFixed(1)+'°  A '+Math.hypot(live.ax,live.ay,live.az).toFixed(2)+' m/s²';
   }
 }
