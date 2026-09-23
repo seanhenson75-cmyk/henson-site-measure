@@ -2,31 +2,32 @@ const $=id=>document.getElementById(id);let device,server,char,pts=[],pos={x:0,y
 const SERVICE_FILTERS=[]; // connect by device name; discover characteristics after pairing
 $('connect').onclick=async()=>{try{device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'WT'}],optionalServices:['0000ffe5-0000-1000-8000-00805f9a34fb']});server=await device.gatt.connect();let services=await server.getPrimaryServices();let candidates=[];for(const s of services){let cs=await s.getCharacteristics();for(const c of cs)if(c.properties.notify||c.properties.indicate)candidates.push(c)}if(!candidates.length)throw Error('No notification characteristic found');char=candidates.find(c=>c.uuid.toLowerCase().includes('ffe4'))||candidates.find(c=>c.uuid.toLowerCase().includes('ffe1'))||candidates[0];await char.startNotifications();char.addEventListener('characteristicvaluechanged',packet);$('status').textContent='Connected • '+char.uuid.slice(4,8);$('status').classList.add('on');}catch(e){alert('Bluetooth connection failed: '+e.message)}};
 function packet(e){
-  const incoming=new Uint8Array(e.target.value.buffer,e.target.value.byteOffset,e.target.value.byteLength);const liveEl=document.getElementById('liveSensor');if(liveEl)liveEl.textContent='RX '+incoming.length+' bytes • '+Array.from(incoming.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
-  rx.push(...incoming);
-  // WitMotion frames are 11 bytes and BLE notifications can split or combine frames.
-  while(rx.length>=11){
-    const start=rx.indexOf(0x55);
-    if(start<0){rx=[];break}
-    if(start>0)rx.splice(0,start);
-    if(rx.length<11)break;
-    const type=rx[1];
-    if(type<0x50||type>0x5f){rx.shift();continue}
-    const frame=rx.slice(0,11);rx.splice(0,11);
-    const dv=new DataView(Uint8Array.from(frame).buffer);
-    if(type===0x51){
-      const g=9.80665;
-      live.ax=dv.getInt16(2,true)/32768*16*g;
-      live.ay=dv.getInt16(4,true)/32768*16*g;
-      live.az=dv.getInt16(6,true)/32768*16*g;
-      integrate(live.ax,live.ay,live.az);
-    }else if(type===0x53){
-      live.roll=dv.getInt16(2,true)/32768*180;
-      live.pitch=dv.getInt16(4,true)/32768*180;
-      live.yaw=dv.getInt16(6,true)/32768*180;
-    }
+  const incoming=new Uint8Array(e.target.value.buffer,e.target.value.byteOffset,e.target.value.byteLength);
+  const liveEl=document.getElementById('liveSensor');
+  // WT9011DCL-BT50 BLE default packet is exactly 20 bytes:
+  // 55 61 + accel XYZ + gyro XYZ + roll/pitch/yaw.
+  if(incoming.length===20 && incoming[0]===0x55 && incoming[1]===0x61){
+    const dv=new DataView(incoming.buffer,incoming.byteOffset,incoming.byteLength),g=9.80665;
+    live.ax=dv.getInt16(2,true)/32768*16*g;
+    live.ay=dv.getInt16(4,true)/32768*16*g;
+    live.az=dv.getInt16(6,true)/32768*16*g;
+    live.roll=dv.getInt16(14,true)/32768*180;
+    live.pitch=dv.getInt16(16,true)/32768*180;
+    live.yaw=dv.getInt16(18,true)/32768*180;
     if(liveEl)liveEl.textContent='LIVE • R '+live.roll.toFixed(1)+'°  P '+live.pitch.toFixed(1)+'°  A '+Math.hypot(live.ax,live.ay,live.az).toFixed(2)+' m/s²';
+    integrate(live.ax,live.ay,live.az);
+    return;
   }
+  // Legacy 11-byte WIT frames, retained for compatibility.
+  rx.push(...incoming);
+  while(rx.length>=11){
+    const s=rx.indexOf(0x55);if(s<0){rx=[];break}if(s>0)rx.splice(0,s);if(rx.length<11)break;
+    const type=rx[1];if(type<0x50||type>0x5f){rx.shift();continue}
+    const frame=rx.slice(0,11);rx.splice(0,11);const dv=new DataView(Uint8Array.from(frame).buffer);
+    if(type===0x51){const g=9.80665;live.ax=dv.getInt16(2,true)/32768*16*g;live.ay=dv.getInt16(4,true)/32768*16*g;live.az=dv.getInt16(6,true)/32768*16*g;integrate(live.ax,live.ay,live.az)}
+    else if(type===0x53){live.roll=dv.getInt16(2,true)/32768*180;live.pitch=dv.getInt16(4,true)/32768*180;live.yaw=dv.getInt16(6,true)/32768*180}
+  }
+  if(liveEl)liveEl.textContent='RX '+incoming.length+' bytes • '+Array.from(incoming.slice(0,8)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
 }
 function integrate(ax,ay,az){if(!running)return;let now=performance.now();if(!last){last=now;return}let dt=Math.min((now-last)/1000,.05);last=now;let mag=Math.hypot(ax,ay,az),still=Math.abs(mag-9.80665)<.12;if(still){if(!lastStill)lastStill=now;if(now-lastStill>180){vel.x=vel.y=vel.z=0}return}else lastStill=0;
 // Raw prototype: gravity/orientation compensation will be calibrated from full IMU packets.
